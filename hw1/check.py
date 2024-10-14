@@ -27,16 +27,18 @@ class MLP(torch.nn.Module):
 
     def set_weights(self):
 ##### Enter Weights Here ###########
-        in_hid_weight = [[-1, 1], [1, -1], [1, -1], [-1, 1]]
-    
- 
-        hid_bias = [0.5, -1.5, 0.5, -1.5]
-    
+        # part2 question2
+        # in_hid_weight = [[-1, 1], [1, -1], [1, -1], [-1, 1]]
+        # hid_bias = [0.5, -1.5, 0.5, -1.5]
+        # hid_out_weight = [[-2, -2, -1, -1]]
+        # out_bias = [2]  
+        # rescale(part2 question3)
+        in_hid_weight = [[-10, 10], [10, -10], [10, -10], [-10, 10]]         
+        hid_bias = [5, -15, 5, -15]         
+        hid_out_weight = [[-20, -20, -10, -10]]         
+        out_bias = [20]
 
-        hid_out_weight = [[-2, -2, -1, -1]]
-    
-  
-        out_bias = [2]  
+####################################
         self.in_hid.weight.data = torch.tensor(
              in_hid_weight, dtype=torch.float32)
         self.in_hid.bias.data   = torch.tensor(
