@@ -64,6 +64,7 @@ with torch.no_grad():
     net.eval()
 
     all_hid = []
+    all_ctx = []  # 保存所有的 context units
     all_state = []
     for epoch in range(args.num_plot):
 
@@ -71,29 +72,56 @@ with torch.no_grad():
         label = seq[1:]
 
         net.init_hidden()
-        hidden_seq, output = net(input)
+        hidden_seq, context_seq, output = net(input)  # 获取 context units
 
         hidden = hidden_seq.squeeze()
+        context = context_seq.squeeze()  # 压缩 context units 以便后续处理
 
         all_hid.append(hidden)
+        all_ctx.append(context)  # 保存 context units
         all_state = all_state + state[1:]
- 
+
+        # 打印当前 epoch 的 context units
+        print(f"Epoch {epoch}: Context Units (c_t):")
+        print(context.cpu().numpy())  # 将 context units 打印到终端
+        print("")
+
         lang.print_outputs(epoch, seq, state, hidden, target, output)
         sys.stdout.flush()
 
-    all_hidden = torch.cat(all_hid,dim=0)
+    all_hidden = torch.cat(all_hid, dim=0)
+    all_context = torch.cat(all_ctx, dim=0)  # 将 context units 连接
+
+    # 绘制隐藏单元
     for k in range(args.hid):
         for j in range(k):
             if args.model == 'srn':
-                plt.plot(net.H0.data[j],net.H0.data[k],'kx')
-            plt.scatter(all_hidden[:,j],all_hidden[:,k], c=all_state,
-                cmap='jet', vmin=0, vmax=max_state)
-            plt.savefig('./plot/%s_%s%d_%d%d.jpg' %(args.lang,args.model,args.hid,j,k))
+                plt.plot(net.H0.data[j], net.H0.data[k], 'kx')
+            plt.scatter(all_hidden[:, j], all_hidden[:, k], c=all_state,
+                        cmap='jet', vmin=0, vmax=max_state)
+            plt.savefig('./plot/%s_%s%d_%d%d_hidden.jpg' %
+                        (args.lang, args.model, args.hid, j, k))
             plt.show()
-            
+
+    # 绘制 context units
+    for k in range(args.hid):
+        for j in range(k):
+            plt.scatter(all_context[:, j], all_context[:, k], c=all_state,
+                        cmap='jet', vmin=0, vmax=max_state)
+            plt.savefig('./plot/%s_%s%d_%d%d_context.jpg' %
+                        (args.lang, args.model, args.hid, j, k))
+            plt.show()
+
     if args.hid >= 3:
         fig = plt.figure()
-        ax = fig.add_subplot(111,projection='3d')
-        ax.scatter(all_hidden[:,0],all_hidden[:,1],all_hidden[:,2],
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(all_hidden[:, 0], all_hidden[:, 1], all_hidden[:, 2],
+                   c=all_state, cmap='jet', vmin=0, vmax=max_state)
+        plt.show()
+        
+        # 绘制 context units 的 3D 图
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.scatter(all_context[:, 0], all_context[:, 1], all_context[:, 2],
                    c=all_state, cmap='jet', vmin=0, vmax=max_state)
         plt.show()
