@@ -1,224 +1,228 @@
-// Released under GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
-// Author: Claude Sammut
-// Last Modified: 2024.10.14
+#!/usr/bin/env python3
 
-// Use this code as the basis for a wall follower
+# Released under GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
+# Author: Claude Sammut
+# Last Modified: 2024.10.14
 
-#include "wall_follower/wall_follower.hpp"
+# ROS 2 program to subscribe to real-time streaming 
+# video from TurtleBot3 Pi camera and find coloured landmarks.
 
-#include <memory>
+# Colour segementation and connected components example added by Claude sSammut
+	
+# Import the necessary libraries
+import rclpy # Python library for ROS 2
+from rclpy.node import Node # Handles the creation of nodes
+import cv2 # OpenCV library
+from cv_bridge import CvBridge # Package to convert between ROS and OpenCV Images
+import math
+
+from sensor_msgs.msg import Image # Image is the message type
+from sensor_msgs.msg import LaserScan # Laser scan message type
+from sensor_msgs.msg import CameraInfo # Need to know camera frame
+from geometry_msgs.msg import Point, PointStamped
+
+import wall_follower.landmark
+from wall_follower.landmark import marker_type
 
 
-namespace {
-  constexpr double kMaxLinear     = 0.15;  
-  constexpr double kMaxAngular    = 1.8;
-  constexpr double kFrontStopDist = 0.22; 
-  constexpr double kFollowDistRef = 0.60;  
-  constexpr int    kBeamWidthDeg  = 15;   
+field_of_view_h = 62.2
+field_of_view_v = 48.8
 
-  inline bool valid_range(double r, double rmin, double rmax) {
-    return std::isfinite(r) && r > rmin + 1e-3 && r < rmax - 1e-3;
-  }
+
+class SeeMarker(Node):
+	"""
+	Create an ImageSubscriber class, which is a subclass of the Node class.
+	"""
+	def __init__(self):
+		"""
+		Class constructor to set up the node
+		"""
+		# Initiate the Node class's constructor and give it a name
+		super().__init__('see_marker')
+
+		self.range = 0
+		self.prev_h = 0
+		self.prev_r = 0
+			
+		# Create the subscriber. This subscriber will receive an Image
+		# from the video_frames topic. The queue size is 10 messages.
+		self.subscription = self.create_subscription(
+			Image,
+			'/camera/image_raw', 
+			self.listener_callback, 
+			10)
+		self.subscription # prevent unused variable warning
+			
+		# Used to convert between ROS and OpenCV images
+		self.br = CvBridge()
+
+		self.point_publisher = self.create_publisher(PointStamped, '/marker_position', 10)
+
+
+	def listener_callback(self, data):
+		"""
+		Callback function.
+		"""
+		# Display the message on the console
+		# self.get_logger().info('Receiving video frame')
+ 
+		# Convert ROS Image message to OpenCV image
+		current_frame = self.br.imgmsg_to_cv2(data, 'bgra8')
+
+		# The following code is a simple example of colour segmentation
+		# and connected components analysis
+		
+		# Convert BGR image to HSV
+		hsv_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2HSV)
+
+		# Find pink blob
+		pink_blob = segment(current_frame, hsv_frame, "pink")
+		if pink_blob:
+			(pink_x, pink_y, pink_h, p_d, p_a) = pink_blob
+
+			for c in ["blue", "green", "yellow"]:
+				blob = segment(current_frame, hsv_frame, c)
+				if blob:
+					(c_x, c_y, c_h, c_d, c_a) = blob
+
+					# Check to see if the blobsa are verically aligned
+					if abs(pink_x - c_x) > pink_h:
+#						print(f'pink_x = {pink_x}, pink_y = {pink_y}, h = {pink_h}')
+						continue
+
+					marker_at = PointStamped()
+					marker_at.header.stamp = self.get_clock().now().to_msg()
+					marker_at.header.frame_id = 'camera_link'
+
+					if c_y < pink_y:	# +y is down
+#						print(c, "/ pink", f'{c_d:.2f}, {c_a:.2f}')
+						marker_at.point.z = float(marker_type.index(c + '/pink'))
+					else:
+#						print("pink / ", c, f'{p_d:.2f}, {p_a:.2f}')
+						marker_at.point.z = float(marker_type.index('pink/' + c))
+					
+					x, y = polar_to_cartesian(c_d, c_a)
+
+					marker_at.point.x = x
+					marker_at.point.y = y
+
+#					print(f'Camera coordinates: {x}, {y}')
+					self.point_publisher.publish(marker_at)
+#					self.get_logger().info('Published Point: x=%f, y=%f, z=%f' %
+#						(marker_at.point.x, marker_at.point.y, marker_at.point.z))
+
+
+		# Display camera image
+		cv2.imshow("camera", current_frame)	
+		cv2.waitKey(1)
+
+
+colours = {
+	"pink":	 	((140,0,0), (170, 255, 255)),
+	"blue":		((100,0,0), (130, 255, 255)),
+	"green":	((40,0,0), (80, 255, 255)),
+	"yellow":	((25,0,0), (32, 255, 255))
 }
 
 
-using namespace std::chrono_literals;
+def segment(current_frame, hsv_frame, colour):
+	"""
+	Mask out everything except the specified colour
+	Connect pixels to form a blob
+	"""
 
-WallFollower::WallFollower()
-: Node("wall_follower_node")
-{
-	/************************************************************
-	** Initialise variables
-	************************************************************/
-	for (int i = 0; i < 12; i++)
-		scan_data_[i] = 0.0;
+	(lower, upper) = colours[colour]
 
-	robot_pose_ = 0.0;
-	near_start = false;
+	# Mask out everything except pink pixels
+	mask = cv2.inRange(hsv_frame, lower, upper)
+	result = cv2.bitwise_and(current_frame, current_frame, mask=mask)
 
-	/************************************************************
-	** Initialise ROS publishers and subscribers
-	************************************************************/
-	auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
+	# Run 4-way connected components, with statistics
+	blobs = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
 
-	// Initialise publishers
-	cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", qos);
-
-	// Initialise subscribers
-	scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
-		"scan", \
-		rclcpp::SensorDataQoS(), \
-		std::bind(
-			&WallFollower::scan_callback, \
-			this, \
-			std::placeholders::_1));
-	odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-		"odom", qos, std::bind(&WallFollower::odom_callback, this, std::placeholders::_1));
-
-	/************************************************************
-	** Initialise ROS timers
-	************************************************************/
-	update_timer_ = this->create_wall_timer(10ms, std::bind(&WallFollower::update_callback, this));
-
-	RCLCPP_INFO(this->get_logger(), "Wall follower node has been initialised");
-}
-
-WallFollower::~WallFollower()
-{
-	RCLCPP_INFO(this->get_logger(), "Wall follower node has been terminated");
-}
-
-/********************************************************************************
-** Callback functions for ROS subscribers
-********************************************************************************/
-
-#define START_RANGE	0.2
-
-void WallFollower::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
-{
-	static bool first = true;
-	static bool start_moving = true;
-
-	tf2::Quaternion q(
-		msg->pose.pose.orientation.x,
-		msg->pose.pose.orientation.y,
-		msg->pose.pose.orientation.z,
-		msg->pose.pose.orientation.w);
-	tf2::Matrix3x3 m(q);
-	double roll, pitch, yaw;
-	m.getRPY(roll, pitch, yaw);
-
-	robot_pose_ = yaw;
-
-	double current_x =  msg->pose.pose.position.x;
-	double current_y =  msg->pose.pose.position.y;
-	if (first)
-	{
-		start_x = current_x;
-		start_y = current_y;
-		first = false;
-	}
-	else if (start_moving)
-	{
-		if (fabs(current_x - start_x) > START_RANGE || fabs(current_y - start_y) > START_RANGE)
-			start_moving = false;
-	}
-	else if (fabs(current_x - start_x) < START_RANGE && fabs(current_y - start_y) < START_RANGE)
-	{
-		fprintf(stderr, "Near start!!\n");
-		near_start = true;
-		first = true;
-		start_moving = true;
-	}
-}
-
-#define BEAM_WIDTH 15
+	# Display masked image
+#	cv2.imshow("result", result)
+ 
+	# Print statistics for each blob (connected component)
+	return get_stats(blobs, colour)
 
 
-void WallFollower::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
-{
+def get_stats(blobs, colour):
+	"""
+	Print statistics for each blob (connected component)
+	of the specified colour
+	Return the centroid and height of the largest blob, if there is one.
+	"""
 
-  const int scan_angle_deg[12] = {0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330};
-
-  auto angle_to_index = [&](double deg) -> int {
-    const double rad = deg * M_PI / 180.0;
-    int idx = static_cast<int>(std::round((rad - msg->angle_min) / msg->angle_increment));
-    if (idx < 0) idx = 0;
-    if (idx >= static_cast<int>(msg->ranges.size())) idx = static_cast<int>(msg->ranges.size()) - 1;
-    return idx;
-  };
-
-  auto sector_min = [&](double center_deg, int half_width_deg) -> double {
-    const int c = angle_to_index(center_deg);
-    const int w = std::max(1, static_cast<int>(std::round(half_width_deg / (msg->angle_increment * 180.0/M_PI))));
-    const int lo = std::max(0, c - w);
-    const int hi = std::min(static_cast<int>(msg->ranges.size()) - 1, c + w);
-    double best = msg->range_max;
-    for (int i = lo; i <= hi; ++i) {
-      const double r = msg->ranges[i];
-      if (valid_range(r, msg->range_min, msg->range_max) && r < best) best = r;
-    }
-    return best;
-  };
+	(numLabels, labels, stats, centroids) = blobs
+	result = []
+	
+	if numLabels == 0:
+		return None
 
 
-  const double front_left_half  = sector_min(+kBeamWidthDeg * 0.5, kBeamWidthDeg);
-  const double front_right_half = sector_min(-kBeamWidthDeg * 0.5, kBeamWidthDeg);
-  scan_data_[0] = std::min(front_left_half, front_right_half);
+	largest = 0
+	rval = None
+	centre = 320 # 640/2
 
-  for (int i = 1; i < 12; ++i) {
-    scan_data_[i] = sector_min(scan_angle_deg[i], kBeamWidthDeg);
-  }
-}
+	for i in range(1, numLabels):
+		x = stats[i, cv2.CC_STAT_LEFT]
+		y = stats[i, cv2.CC_STAT_TOP]
+		w = stats[i, cv2.CC_STAT_WIDTH]
+		h = stats[i, cv2.CC_STAT_HEIGHT]
+		area = stats[i, cv2.CC_STAT_AREA]
+		(cx, cy) = centroids[i]
+#		print(colour, x, y, w, h, area, cx, cy)
 
+		if area > largest:
+			largest = area
+			distance = 35.772 * pow(h, -0.859) # obtained experimentally
+			aspect_ratio = h/w
+			if aspect_ratio < 0.8:
+				if cx < centre:
+					cx += h-w
+				else:
+					cx -= h-w
+			angle = (centre - cx) * field_of_view_h / 640
+			if angle < 0:
+				angle += 360
+			rval = (cx, cy, h, distance, angle)
 
-void WallFollower::update_cmd_vel(double linear, double angular)
-{
-  geometry_msgs::msg::Twist cmd_vel;
-  cmd_vel.linear.x  = std::clamp(linear,  -kMaxLinear,  kMaxLinear);
-  cmd_vel.angular.z = std::clamp(angular, -kMaxAngular, kMaxAngular);
-  cmd_vel_pub_->publish(cmd_vel);
-}
-
-/********************************************************************************
-** Update functions
-********************************************************************************/
-
-bool pl_near;
-
-
-void WallFollower::update_callback()
-{
-  if (near_start) { update_cmd_vel(0.0, 0.0); exit(0); }
-
-  const double front = scan_data_[FRONT]; 
-  if (front < kFrontStopDist) {
-    update_cmd_vel(0.0, 0.0);
-    return;
-  }
-
-  const double lf = scan_data_[LEFT_FRONT];
-  const double fl = scan_data_[FRONT_LEFT];
-  const double fr = scan_data_[FRONT_RIGHT];
+	return rval
 
 
-  if (lf > 1.0) {
-  
-    update_cmd_vel(0.12, +1.2);
-  }
-  else if (front < 0.50) {
-   
-    update_cmd_vel(0.0, -1.2);
-  }
-  else if (fl < kFollowDistRef) {
-  
-    update_cmd_vel(0.12, -1.0);
-  }
-  else if (fr < kFollowDistRef) {
-    ）
-    update_cmd_vel(0.12, +1.0);
-  }
-  else if (lf > 0.75) {
-  
-    update_cmd_vel(0.12, +0.8);
-  }
-  else {
-    update_cmd_vel(0.15, 0.0);
-  }
-}
+def polar_to_cartesian(distance, angle):
+	# Convert angle from degrees to radians
+	angle_rad = math.radians(angle)
+
+	# Calculate x and y coordinates
+	x = distance * math.cos(angle_rad)
+	y = distance * math.sin(angle_rad)
+
+	return x, y
 
 
+def main(args=None):
+	
+	# Initialize the rclpy library
+	rclpy.init(args=args)
+	
+	# Create the node
+	see_marker = SeeMarker()
+	
+	# Spin the node so the callback function is called.
+	try:
+		rclpy.spin(see_marker)
+	except KeyboardInterrupt:
+		exit()
 
-
-
-/*******************************************************************************
-** Main
-*******************************************************************************/
-int main(int argc, char ** argv)
-{
-	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<WallFollower>());
-	rclcpp::shutdown();
-
-	return 0;
-}
+	# Destroy the node explicitly
+	# (optional - otherwise it will be done automatically
+	# when the garbage collector destroys the node object)
+	see_marker.destroy_node()
+	
+	# Shutdown the ROS client library for Python
+	rclpy.shutdown()
+	
+if __name__ == '__main__':
+	main()
