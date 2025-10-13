@@ -7,6 +7,7 @@
 #include "wall_follower/wall_follower.hpp"
 
 #include <memory>
+#include <iostream>
 
 
 using namespace std::chrono_literals;
@@ -142,13 +143,95 @@ bool pl_near;
 
 void WallFollower::update_callback()
 {
-	if (near_start) {update_cmd_vel(0.0, 0.0); exit(0);}
-	else if (scan_data_[LEFT_FRONT] > 0.9) update_cmd_vel(0.2, 1.5);
-	else if (scan_data_[FRONT] < 0.7) update_cmd_vel(0.0, -1.5);
-	else if (scan_data_[FRONT_LEFT] < 0.6) update_cmd_vel(0.3, -1.5);
-	else if (scan_data_[FRONT_RIGHT] < 0.6) update_cmd_vel(0.3, 1.5);
-	else if (scan_data_[LEFT_FRONT] > 0.6) update_cmd_vel(0.3, 1.5);
-	else update_cmd_vel(0.3, 0.0);
+   std::cerr << " FRONT " << scan_data_[FRONT];
+   std::cerr << " FRONT_LEFT " << scan_data_[FRONT_LEFT];
+   std::cerr << " LEFT_FRONT " << scan_data_[LEFT_FRONT];
+   std::cerr << " LEFT " << scan_data_[LEFT];
+   std::cerr << " LEFT_BACK " << scan_data_[LEFT_BACK];
+   std::cerr << " BACK_LEFT " << scan_data_[BACK_LEFT];
+   std::cerr << " BACK " << scan_data_[BACK];
+   std::cerr << " BACK_RIGHT " << scan_data_[BACK_RIGHT];
+   std::cerr << " RIGHT_BACK " << scan_data_[RIGHT_BACK];
+   std::cerr << " RIGHT " << scan_data_[RIGHT];
+   std::cerr << " RIGHT_FRONT " << scan_data_[RIGHT_FRONT];
+   std::cerr << " FRONT_RIGHT " << scan_data_[FRONT_RIGHT];
+   std::cerr << '\n';
+   // update_cmd_vel(0,0);
+//  if (scan_data_[FRONT] > 0.8) {
+//        if (scan_data_[LEFT_FRONT] < 0.35) {
+//            update_cmd_vel(0.2, -0.6);
+//        } else if (scan_data_[LEFT_FRONT > 0.5]) {
+//          update_cmd_vel(0.2, 0.6);
+//     } 
+
+//     else if (scan_data_[RIGHT_FRONT] > 0.42 && scan_data_[LEFT_FRONT] > 0.4) {
+//            update_cmd_vel(0.2,0.3);
+//         return;
+//        } else if (scan_data_[RIGHT_FRONT] < 0.42) {
+//            update_cmd_vel(0.2,0.6);
+//         return;
+//        }
+//        update_cmd_vel(0.3,0);
+//    } else if (scan_data_[FRONT] < 0.7) {
+//        update_cmd_vel(0,0);
+//        if (scan_data_[RIGHT_FRONT] > 0.35) {
+//            update_cmd_vel(0.1,1.1);
+//         return;
+//        }
+//    }
+//    if (scan_data_[FRONT_LEFT] < 0.7) {
+//        update_cmd_vel(0.1,-1.25);
+//     return;
+//    } else if (scan_data_[FRONT_RIGHT] < 0.7) {
+//        update_cmd_vel(0.1, 1.25);
+//     return;
+
+//    } else if (scan_data_[LEFT_FRONT] < 0.55) {
+//  update_cmd_vel(0.1, -0.8);
+//     return;
+
+//    } else if (scan_data_[RIGHT_FRONT] < 0.5) {
+//  update_cmd_vel(0.1, 0.7);
+//     return;
+
+//    }
+   if (near_start) {
+       update_cmd_vel(0.0, 0.0); exit(0);
+   }
+   // if nothing in front, go forward
+   if (scan_data_[FRONT] > 0.6) {
+       if (scan_data_[LEFT_FRONT] < 0.43 && scan_data_[LEFT_BACK] < 0.43) {
+           update_cmd_vel(0.2,0); //go straight when left back and front are similar
+           return;
+       }  else
+       if (scan_data_[LEFT_FRONT] > 0.40) {
+           update_cmd_vel(0.1, 0.3); //track left wall when too far right
+           return;
+       } else if (scan_data_[LEFT_FRONT] < 0.40) {
+           update_cmd_vel(0.1, -0.3); // turn right when too close left
+           return;
+       }
+       return;
+
+   } else if (scan_data_[FRONT] < 0.6) { //when there is obsticles
+       if (scan_data_[FRONT] < 0.4) { //too close to the front wall
+           update_cmd_vel(-0.1,0);
+           return;
+       } else
+       if (scan_data_[FRONT_LEFT] < 0.5 && scan_data_[FRONT_RIGHT] < 0.5) { //when there is wall in front
+           update_cmd_vel(0.1,-1.8);
+           return;
+       } else
+       if (scan_data_[LEFT_BACK] > 0.40) {
+           update_cmd_vel(0.1, -0.3);
+           return;
+       } else if (scan_data_[LEFT_BACK] < 0.40) {
+           update_cmd_vel(0.1, -0.3);
+           return;
+       }
+       update_cmd_vel(0,0);
+       return;
+   }
 }
 
 
