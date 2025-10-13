@@ -1,228 +1,276 @@
-#!/usr/bin/env python3
+// Released under GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
+// Author: Claude Sammut
+// Last Modified: 2024.10.14
 
-# Released under GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
-# Author: Claude Sammut
-# Last Modified: 2024.10.14
+// Use this code as the basis for a wall follower
 
-# ROS 2 program to subscribe to real-time streaming 
-# video from TurtleBot3 Pi camera and find coloured landmarks.
+#include "wall_follower/wall_follower.hpp"
 
-# Colour segementation and connected components example added by Claude sSammut
-	
-# Import the necessary libraries
-import rclpy # Python library for ROS 2
-from rclpy.node import Node # Handles the creation of nodes
-import cv2 # OpenCV library
-from cv_bridge import CvBridge # Package to convert between ROS and OpenCV Images
-import math
-
-from sensor_msgs.msg import Image # Image is the message type
-from sensor_msgs.msg import LaserScan # Laser scan message type
-from sensor_msgs.msg import CameraInfo # Need to know camera frame
-from geometry_msgs.msg import Point, PointStamped
-
-import wall_follower.landmark
-from wall_follower.landmark import marker_type
+#include <memory>
 
 
-field_of_view_h = 62.2
-field_of_view_v = 48.8
+using namespace std::chrono_literals;
+
+WallFollower::WallFollower()
+: Node("wall_follower_node")
+{
+	/************************************************************
+	** Initialise variables
+	************************************************************/
+	for (int i = 0; i < 12; i++)
+		scan_data_[i] = 0.0;
+
+	robot_pose_ = 0.0;
+	near_start = false;
+
+	/************************************************************
+	** Initialise ROS publishers and subscribers
+	************************************************************/
+	auto qos = rclcpp::QoS(rclcpp::KeepLast(10));
+
+	// Initialise publishers
+	cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", qos);
+
+	// Initialise subscribers
+	scan_sub_ = this->create_subscription<sensor_msgs::msg::LaserScan>(
+		"scan", \
+		rclcpp::SensorDataQoS(), \
+		std::bind(
+			&WallFollower::scan_callback, \
+			this, \
+			std::placeholders::_1));
+	odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+		"odom", qos, std::bind(&WallFollower::odom_callback, this, std::placeholders::_1));
+
+	/************************************************************
+	** Initialise ROS timers
+	************************************************************/
+	update_timer_ = this->create_wall_timer(10ms, std::bind(&WallFollower::update_callback, this));
+
+	RCLCPP_INFO(this->get_logger(), "Wall follower node has been initialised");
+}
+
+WallFollower::~WallFollower()
+{
+	RCLCPP_INFO(this->get_logger(), "Wall follower node has been terminated");
+}
+
+/********************************************************************************
+** Callback functions for ROS subscribers
+********************************************************************************/
+
+#define START_RANGE	0.2
+
+void WallFollower::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
+{
+	static bool first = true;
+	static bool start_moving = true;
+
+	tf2::Quaternion q(
+		msg->pose.pose.orientation.x,
+		msg->pose.pose.orientation.y,
+		msg->pose.pose.orientation.z,
+		msg->pose.pose.orientation.w);
+	tf2::Matrix3x3 m(q);
+	double roll, pitch, yaw;
+	m.getRPY(roll, pitch, yaw);
+
+	robot_pose_ = yaw;
+
+	double current_x =  msg->pose.pose.position.x;
+	double current_y =  msg->pose.pose.position.y;
+	if (first)
+	{
+		start_x = current_x;
+		start_y = current_y;
+		first = false;
+	}
+	else if (start_moving)
+	{
+		if (fabs(current_x - start_x) > START_RANGE || fabs(current_y - start_y) > START_RANGE)
+			start_moving = false;
+	}
+	else if (fabs(current_x - start_x) < START_RANGE && fabs(current_y - start_y) < START_RANGE)
+	{
+		fprintf(stderr, "Near start!!\n");
+		near_start = true;
+		first = true;
+		start_moving = true;
+	}
+}
+
+#define BEAM_WIDTH 15
+
+void WallFollower::scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+{
+	uint16_t scan_angle[12] = {0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330};
+
+	double closest = msg->range_max;
+	for (int angle = 360-BEAM_WIDTH; angle < 360; angle++)
+		if (msg->ranges.at(angle) < closest)
+			closest = msg->ranges.at(angle);
+	for (int angle = 0; angle < BEAM_WIDTH; angle++)
+		if (msg->ranges.at(angle) < closest)
+			closest = msg->ranges.at(angle);
+	scan_data_[0] = closest;
+
+	for (int i = 1; i < 12; i++)
+	{
+		closest = msg->range_max;
+		for (int angle = scan_angle[i]-BEAM_WIDTH; angle < scan_angle[i]+BEAM_WIDTH; angle++)
+			if (msg->ranges.at(angle) < closest)
+				closest = msg->ranges.at(angle);
+		scan_data_[i] = closest;
+	}
+}
+
+void WallFollower::update_cmd_vel(double linear, double angular)
+{
+	geometry_msgs::msg::Twist cmd_vel;
+	cmd_vel.linear.x = linear;
+	cmd_vel.angular.z = angular;
+
+	cmd_vel_pub_->publish(cmd_vel);
+}
+
+/********************************************************************************
+** Update functions
+********************************************************************************/
+
+bool pl_near;
 
 
-class SeeMarker(Node):
-	"""
-	Create an ImageSubscriber class, which is a subclass of the Node class.
-	"""
-	def __init__(self):
-		"""
-		Class constructor to set up the node
-		"""
-		# Initiate the Node class's constructor and give it a name
-		super().__init__('see_marker')
+void WallFollower::update_callback()
+{
+  using clock = std::chrono::steady_clock;
 
-		self.range = 0
-		self.prev_h = 0
-		self.prev_r = 0
-			
-		# Create the subscriber. This subscriber will receive an Image
-		# from the video_frames topic. The queue size is 10 messages.
-		self.subscription = self.create_subscription(
-			Image,
-			'/camera/image_raw', 
-			self.listener_callback, 
-			10)
-		self.subscription # prevent unused variable warning
-			
-		# Used to convert between ROS and OpenCV images
-		self.br = CvBridge()
+  // --- Turn lock: prevent sudden cancellation of turning
+  // when the front suddenly becomes clear ---
+  static clock::time_point lock_until = clock::time_point::min();
+  static double lock_dir = 0.0; // +1 = turning left, -1 = turning right
+  const bool locked = (clock::now() < lock_until);
 
-		self.point_publisher = self.create_publisher(PointStamped, '/marker_position', 10)
+  // Helper: initiate a locked turn for a duration
+  auto lock_turn = [&](double seconds, double v, double w_sign){
+	lock_dir = (w_sign >= 0.0) ? +1.0 : -1.0;
+	lock_until = clock::now() + std::chrono::duration<double>(seconds);
+	// Use go() so limits and W_SAFE apply consistently
+	go(v, (w_sign >= 0.0 ? +W_SAFE : -W_SAFE));
+  };
 
 
-	def listener_callback(self, data):
-		"""
-		Callback function.
-		"""
-		# Display the message on the console
-		# self.get_logger().info('Receiving video frame')
- 
-		# Convert ROS Image message to OpenCV image
-		current_frame = self.br.imgmsg_to_cv2(data, 'bgra8')
+  // Helper: safely send velocity command with limits
+  auto go = [&](double v, double w){
+    const double VMAX = 0.25;
+    const double WMAX = 1.8;
+    if (v >  VMAX) v =  VMAX;
+    if (v < -0.15) v = -0.15;
+    if (w >  WMAX) w =  WMAX;
+    if (w < -WMAX) w = -WMAX;
+    update_cmd_vel(v, w);
+  };
 
-		# The following code is a simple example of colour segmentation
-		# and connected components analysis
-		
-		# Convert BGR image to HSV
-		hsv_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2HSV)
+  // Stop if the robot is near the start position
+  if (near_start) { go(0.0, 0.0); exit(0); }
 
-		# Find pink blob
-		pink_blob = segment(current_frame, hsv_frame, "pink")
-		if pink_blob:
-			(pink_x, pink_y, pink_h, p_d, p_a) = pink_blob
+  // --- Extract common sensor directions ---
+  const double F  = scan_data_[FRONT];
+  const double FL = scan_data_[FRONT_LEFT];
+  const double LF = scan_data_[LEFT_FRONT];
+  const double L  = scan_data_[LEFT];
+  const double LB = scan_data_[LEFT_BACK];
+  const double FR = scan_data_[FRONT_RIGHT];
 
-			for c in ["blue", "green", "yellow"]:
-				blob = segment(current_frame, hsv_frame, c)
-				if blob:
-					(c_x, c_y, c_h, c_d, c_a) = blob
+  // --- Tunable parameters ---
+  const double FRONT_STOP = 0.40;   // distance to stop
+  const double FRONT_GO   = 0.60;   // distance = “front is open”
+  const double V_FWD      = 0.20;   // normal forward speed
+  const double V_SLOW     = 0.10;   // slow speed
+  const double W_SAFE     = 1.2;    // safe angular velocity
+  const double EPS_SIM    = 0.04;   // tolerance for “similar distance”
+  const double LEFT_SET   = 0.40;   // ideal wall distance on the left
+  const double BAND       = 0.03;   // hysteresis band
 
-					# Check to see if the blobsa are verically aligned
-					if abs(pink_x - c_x) > pink_h:
-#						print(f'pink_x = {pink_x}, pink_y = {pink_y}, h = {pink_h}')
-						continue
+  // Handle NaN / Inf readings to prevent logic flickering
+  auto finite = [](double x){ return std::isfinite(x); };
+  const double Fv  = finite(F)?  F  : 10.0;
+  const double FLv = finite(FL)? FL : 10.0;
+  const double LFv = finite(LF)? LF : 10.0;
+  const double Lv  = finite(L)?  L  : 10.0;
+  const double LBv = finite(LB)? LB : 10.0;
+  const double FRv = finite(FR)? FR : 10.0;
 
-					marker_at = PointStamped()
-					marker_at.header.stamp = self.get_clock().now().to_msg()
-					marker_at.header.frame_id = 'camera_link'
+  // --- Emergency: obstacle directly ahead or front-right ---
+  if (!locked && (Fv < FRONT_STOP || FRv < FRONT_STOP)) {
+    lock_turn(0.5, 0.0, -W_SAFE);  // rotate right for 0.5s
+    return;
+  }
 
-					if c_y < pink_y:	# +y is down
-#						print(c, "/ pink", f'{c_d:.2f}, {c_a:.2f}')
-						marker_at.point.z = float(marker_type.index(c + '/pink'))
-					else:
-#						print("pink / ", c, f'{p_d:.2f}, {p_a:.2f}')
-						marker_at.point.z = float(marker_type.index('pink/' + c))
-					
-					x, y = polar_to_cartesian(c_d, c_a)
+  // --- During turn lock: keep turning smoothly ---
+  if (locked) {
+    go(V_SLOW, 0.8 * (lock_dir >= 0.0 ? +1.0 : -1.0));
+    return;
+  }
 
-					marker_at.point.x = x
-					marker_at.point.y = y
+  // --- Clear front area ---
+  if (Fv >= FRONT_GO) {
+    // Left-front and left-back similar → wall parallel → go straight
+    if (std::fabs(LFv - LBv) < EPS_SIM) {
+      go(V_FWD, 0.0);
+      return;
+    }
+    // Too far from wall → move left
+    if (LFv > LEFT_SET + BAND) {
+      go(0.1, +0.3);
+      return;
+    }
+    // Too close to wall → move right
+    if (LFv < LEFT_SET - BAND) {
+      go(0.1, -0.3);
+      return;
+    }
+    // Default: move forward slowly
+    go(0.15, 0.0);
+    return;
+  }
 
-#					print(f'Camera coordinates: {x}, {y}')
-					self.point_publisher.publish(marker_at)
-#					self.get_logger().info('Published Point: x=%f, y=%f, z=%f' %
-#						(marker_at.point.x, marker_at.point.y, marker_at.point.z))
+  // --- Not enough front clearance ---
+  if (Fv < FRONT_STOP) {
+    // Too close: stop and turn right
+    go(0.0, -W_SAFE);
+    return;
+  }
 
+  // Both front-left and front-right close → corner → turn right
+  if (FLv < 0.5 && FRv < 0.5) {
+    go(V_SLOW, -W_SAFE);
+    return;
+  }
 
-		# Display camera image
-		cv2.imshow("camera", current_frame)	
-		cv2.waitKey(1)
+  // Adjust based on left-back (fine-tuning)
+  if (LBv > LEFT_SET + BAND) {
+    go(0.1, +0.3); // wall drifting away → left correction
+    return;
+  } else if (LBv < LEFT_SET - BAND) {
+    go(0.1, -0.3); // wall too close → right correction
+    return;
+  }
 
-
-colours = {
-	"pink":	 	((140,0,0), (170, 255, 255)),
-	"blue":		((100,0,0), (130, 255, 255)),
-	"green":	((40,0,0), (80, 255, 255)),
-	"yellow":	((25,0,0), (32, 255, 255))
+  // Default stop (should rarely happen)
+  go(0.0, 0.0);
 }
 
 
-def segment(current_frame, hsv_frame, colour):
-	"""
-	Mask out everything except the specified colour
-	Connect pixels to form a blob
-	"""
-
-	(lower, upper) = colours[colour]
-
-	# Mask out everything except pink pixels
-	mask = cv2.inRange(hsv_frame, lower, upper)
-	result = cv2.bitwise_and(current_frame, current_frame, mask=mask)
-
-	# Run 4-way connected components, with statistics
-	blobs = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
-
-	# Display masked image
-#	cv2.imshow("result", result)
- 
-	# Print statistics for each blob (connected component)
-	return get_stats(blobs, colour)
 
 
-def get_stats(blobs, colour):
-	"""
-	Print statistics for each blob (connected component)
-	of the specified colour
-	Return the centroid and height of the largest blob, if there is one.
-	"""
+/*******************************************************************************
+** Main
+*******************************************************************************/
+int main(int argc, char ** argv)
+{
+	rclcpp::init(argc, argv);
+	rclcpp::spin(std::make_shared<WallFollower>());
+	rclcpp::shutdown();
 
-	(numLabels, labels, stats, centroids) = blobs
-	result = []
-	
-	if numLabels == 0:
-		return None
-
-
-	largest = 0
-	rval = None
-	centre = 320 # 640/2
-
-	for i in range(1, numLabels):
-		x = stats[i, cv2.CC_STAT_LEFT]
-		y = stats[i, cv2.CC_STAT_TOP]
-		w = stats[i, cv2.CC_STAT_WIDTH]
-		h = stats[i, cv2.CC_STAT_HEIGHT]
-		area = stats[i, cv2.CC_STAT_AREA]
-		(cx, cy) = centroids[i]
-#		print(colour, x, y, w, h, area, cx, cy)
-
-		if area > largest:
-			largest = area
-			distance = 35.772 * pow(h, -0.859) # obtained experimentally
-			aspect_ratio = h/w
-			if aspect_ratio < 0.8:
-				if cx < centre:
-					cx += h-w
-				else:
-					cx -= h-w
-			angle = (centre - cx) * field_of_view_h / 640
-			if angle < 0:
-				angle += 360
-			rval = (cx, cy, h, distance, angle)
-
-	return rval
-
-
-def polar_to_cartesian(distance, angle):
-	# Convert angle from degrees to radians
-	angle_rad = math.radians(angle)
-
-	# Calculate x and y coordinates
-	x = distance * math.cos(angle_rad)
-	y = distance * math.sin(angle_rad)
-
-	return x, y
-
-
-def main(args=None):
-	
-	# Initialize the rclpy library
-	rclpy.init(args=args)
-	
-	# Create the node
-	see_marker = SeeMarker()
-	
-	# Spin the node so the callback function is called.
-	try:
-		rclpy.spin(see_marker)
-	except KeyboardInterrupt:
-		exit()
-
-	# Destroy the node explicitly
-	# (optional - otherwise it will be done automatically
-	# when the garbage collector destroys the node object)
-	see_marker.destroy_node()
-	
-	# Shutdown the ROS client library for Python
-	rclpy.shutdown()
-	
-if __name__ == '__main__':
-	main()
+	return 0;
+}
