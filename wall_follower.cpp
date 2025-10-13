@@ -142,122 +142,95 @@ bool pl_near;
 
 void WallFollower::update_callback()
 {
-  using clock = std::chrono::steady_clock;
-
-  // --- Turn lock: prevent sudden cancellation of turning
-  // when the front suddenly becomes clear ---
-  static clock::time_point lock_until = clock::time_point::min();
-  static double lock_dir = 0.0; // +1 = turning left, -1 = turning right
-  const bool locked = (clock::now() < lock_until);
-
-  // Helper: initiate a locked turn for a duration
-  auto lock_turn = [&](double seconds, double v, double w_sign){
-	lock_dir = (w_sign >= 0.0) ? +1.0 : -1.0;
-	lock_until = clock::now() + std::chrono::duration<double>(seconds);
-	// Use go() so limits and W_SAFE apply consistently
-	go(v, (w_sign >= 0.0 ? +W_SAFE : -W_SAFE));
-  };
-
-
-  // Helper: safely send velocity command with limits
-  auto go = [&](double v, double w){
-    const double VMAX = 0.25;
-    const double WMAX = 1.8;
-    if (v >  VMAX) v =  VMAX;
-    if (v < -0.15) v = -0.15;
-    if (w >  WMAX) w =  WMAX;
-    if (w < -WMAX) w = -WMAX;
-    update_cmd_vel(v, w);
-  };
-
-  // Stop if the robot is near the start position
-  if (near_start) { go(0.0, 0.0); exit(0); }
-
-  // --- Extract common sensor directions ---
-  const double F  = scan_data_[FRONT];
-  const double FL = scan_data_[FRONT_LEFT];
-  const double LF = scan_data_[LEFT_FRONT];
-  const double L  = scan_data_[LEFT];
-  const double LB = scan_data_[LEFT_BACK];
-  const double FR = scan_data_[FRONT_RIGHT];
-
-  // --- Tunable parameters ---
-  const double FRONT_STOP = 0.40;   // distance to stop
-  const double FRONT_GO   = 0.60;   // distance = “front is open”
-  const double V_FWD      = 0.20;   // normal forward speed
-  const double V_SLOW     = 0.10;   // slow speed
-  const double W_SAFE     = 1.2;    // safe angular velocity
-  const double EPS_SIM    = 0.04;   // tolerance for “similar distance”
-  const double LEFT_SET   = 0.40;   // ideal wall distance on the left
-  const double BAND       = 0.03;   // hysteresis band
-
-  // Handle NaN / Inf readings to prevent logic flickering
-  auto finite = [](double x){ return std::isfinite(x); };
-  const double Fv  = finite(F)?  F  : 10.0;
-  const double FLv = finite(FL)? FL : 10.0;
-  const double LFv = finite(LF)? LF : 10.0;
-  const double Lv  = finite(L)?  L  : 10.0;
-  const double LBv = finite(LB)? LB : 10.0;
-  const double FRv = finite(FR)? FR : 10.0;
-
-  // --- Emergency: obstacle directly ahead or front-right ---
-  if (!locked && (Fv < FRONT_STOP || FRv < FRONT_STOP)) {
-    lock_turn(0.5, 0.0, -W_SAFE);  // rotate right for 0.5s
-    return;
-  }
-
-  // --- During turn lock: keep turning smoothly ---
-  if (locked) {
-    go(V_SLOW, 0.8 * (lock_dir >= 0.0 ? +1.0 : -1.0));
-    return;
-  }
-
-  // --- Clear front area ---
-  if (Fv >= FRONT_GO) {
-    // Left-front and left-back similar → wall parallel → go straight
-    if (std::fabs(LFv - LBv) < EPS_SIM) {
-      go(V_FWD, 0.0);
-      return;
-    }
-    // Too far from wall → move left
-    if (LFv > LEFT_SET + BAND) {
-      go(0.1, +0.3);
-      return;
-    }
-    // Too close to wall → move right
-    if (LFv < LEFT_SET - BAND) {
-      go(0.1, -0.3);
-      return;
-    }
-    // Default: move forward slowly
-    go(0.15, 0.0);
-    return;
-  }
-
-  // --- Not enough front clearance ---
-  if (Fv < FRONT_STOP) {
-    // Too close: stop and turn right
-    go(0.0, -W_SAFE);
-    return;
-  }
-
-  // Both front-left and front-right close → corner → turn right
-  if (FLv < 0.5 && FRv < 0.5) {
-    go(V_SLOW, -W_SAFE);
-    return;
-  }
-
-  // Adjust based on left-back (fine-tuning)
-  if (LBv > LEFT_SET + BAND) {
-    go(0.1, +0.3); // wall drifting away → left correction
-    return;
-  } else if (LBv < LEFT_SET - BAND) {
-    go(0.1, -0.3); // wall too close → right correction
-    return;
-  }
-
-  // Default stop (should rarely happen)
-  go(0.0, 0.0);
+   std::cerr << " FRONT " << scan_data_[FRONT];
+   std::cerr << " FRONT_LEFT " << scan_data_[FRONT_LEFT];
+   std::cerr << " LEFT_FRONT " << scan_data_[LEFT_FRONT];
+   std::cerr << " LEFT " << scan_data_[LEFT];
+   std::cerr << " LEFT_BACK " << scan_data_[LEFT_BACK];
+   std::cerr << " BACK_LEFT " << scan_data_[BACK_LEFT];
+   std::cerr << " BACK " << scan_data_[BACK];
+   std::cerr << " BACK_RIGHT " << scan_data_[BACK_RIGHT];
+   std::cerr << " RIGHT_BACK " << scan_data_[RIGHT_BACK];
+   std::cerr << " RIGHT " << scan_data_[RIGHT];
+   std::cerr << " RIGHT_FRONT " << scan_data_[RIGHT_FRONT];
+   std::cerr << " FRONT_RIGHT " << scan_data_[FRONT_RIGHT];
+   std::cerr << '\n';
+   // update_cmd_vel(0,0);
+//  if (scan_data_[FRONT] > 0.8) {
+//        if (scan_data_[LEFT_FRONT] < 0.35) {
+//            update_cmd_vel(0.2, -0.6);
+//        } else if (scan_data_[LEFT_FRONT > 0.5]) {
+//          update_cmd_vel(0.2, 0.6);
+//     } 
+     
+//     else if (scan_data_[RIGHT_FRONT] > 0.42 && scan_data_[LEFT_FRONT] > 0.4) {
+//            update_cmd_vel(0.2,0.3);
+//         return;
+//        } else if (scan_data_[RIGHT_FRONT] < 0.42) {
+//            update_cmd_vel(0.2,0.6);
+//         return;
+//        }
+//        update_cmd_vel(0.3,0);
+//    } else if (scan_data_[FRONT] < 0.7) {
+//        update_cmd_vel(0,0);
+//        if (scan_data_[RIGHT_FRONT] > 0.35) {
+//            update_cmd_vel(0.1,1.1);
+//         return;
+//        }
+//    }
+//    if (scan_data_[FRONT_LEFT] < 0.7) {
+//        update_cmd_vel(0.1,-1.25);
+//     return;
+//    } else if (scan_data_[FRONT_RIGHT] < 0.7) {
+//        update_cmd_vel(0.1, 1.25);
+//     return;
+ 
+//    } else if (scan_data_[LEFT_FRONT] < 0.55) {
+//  update_cmd_vel(0.1, -0.8);
+//     return;
+ 
+//    } else if (scan_data_[RIGHT_FRONT] < 0.5) {
+//  update_cmd_vel(0.1, 0.7);
+//     return;
+ 
+//    }
+   if (near_start) {
+       update_cmd_vel(0.0, 0.0); exit(0);
+   }
+   // if nothing in front, go forward
+   if (scan_data_[FRONT] > 0.6) {
+       if (scan_data_[LEFT_FRONT] < 0.43 && scan_data_[LEFT_BACK] < 0.43) {
+           update_cmd_vel(0.2,0); //go straight when left back and front are similar
+           return;
+       }  else
+       if (scan_data_[LEFT_FRONT] > 0.40) {
+           update_cmd_vel(0.1, 0.3); //track left wall when too far right
+           return;
+       } else if (scan_data_[LEFT_FRONT] < 0.40) {
+           update_cmd_vel(0.1, -0.3); // turn right when too close left
+           return;
+       }
+       return;
+      
+   } else if (scan_data_[FRONT] < 0.6) { //when there is obsticles
+       if (scan_data_[FRONT] < 0.4) { //too close to the front wall
+           update_cmd_vel(-0.2,0);
+           return;
+       } else
+       if (scan_data_[FRONT_LEFT] < 0.5 && scan_data_[FRONT_RIGHT] < 0.5) { //when there is wall in front
+           update_cmd_vel(0.1,-1.8);
+           return;
+       } else
+       if (scan_data_[LEFT_BACK] > 0.40) {
+           update_cmd_vel(0.1, -0.3);
+           return;
+       } else if (scan_data_[LEFT_BACK] < 0.40) {
+           update_cmd_vel(0.1, -0.3);
+           return;
+       }
+       update_cmd_vel(0,0);
+       return;
+   }
 }
 
 
