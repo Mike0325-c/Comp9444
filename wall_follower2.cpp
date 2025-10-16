@@ -139,43 +139,9 @@ void WallFollower::update_cmd_vel(double linear, double angular)
 
 bool pl_near;
 
-
 void WallFollower::update_callback()
 {
   using clock = std::chrono::steady_clock;
-
-  // --- Turn lock: prevent sudden cancellation of turning
-  // when the front suddenly becomes clear ---
-  static clock::time_point lock_until = clock::time_point::min();
-  static double lock_dir = 0.0; // +1 = turning left, -1 = turning right
-  const bool locked = (clock::now() < lock_until);
-
-  // Helper: initiate a locked turn for a duration
-  auto lock_turn = [&](double seconds, double v, double w_sign){
-	lock_dir = (w_sign >= 0.0) ? +1.0 : -1.0;
-	lock_until = clock::now() + std::chrono::duration_cast<clock::duration>(
-		std::chrono::duration<double>(seconds)
-	);
-
-	// Use go() so limits and W_SAFE apply consistently
-	go(v, (w_sign >= 0.0 ? +W_SAFE : -W_SAFE));
-  };
-
-
-  // Helper: safely send velocity command with limits
-  auto go = [&](double v, double w){
-    const double VMAX = 0.25;
-    const double WMAX = 1.8;
-    if (v >  VMAX) v =  VMAX;
-    if (v < -0.15) v = -0.15;
-    if (w >  WMAX) w =  WMAX;
-    if (w < -WMAX) w = -WMAX;
-    update_cmd_vel(v, w);
-  };
-
-  // Stop if the robot is near the start position
-  if (near_start) { go(0.0, 0.0); exit(0); }
-
   // --- Extract common sensor directions ---
   const double F  = scan_data_[FRONT];
   const double FL = scan_data_[FRONT_LEFT];
@@ -200,8 +166,35 @@ void WallFollower::update_callback()
   const double FLv = finite(FL)? FL : 10.0;
   const double LFv = finite(LF)? LF : 10.0;
   const double Lv  = finite(L)?  L  : 10.0;
+  (void)Lv;
   const double LBv = finite(LB)? LB : 10.0;
   const double FRv = finite(FR)? FR : 10.0;
+
+  // --- Turn lock: prevent sudden cancellation of turning
+  // when the front suddenly becomes clear ---
+  static clock::time_point lock_until = clock::time_point::min();
+  static double lock_dir = 0.0; // +1 = turning left, -1 = turning right
+  const bool locked = (clock::now() < lock_until);
+
+  // Helper: initiate a locked turn for a duration
+  auto lock_turn = [&](double seconds, double v, double w_sign){
+	lock_dir = (w_sign >= 0.0) ? +1.0 : -1.0;
+	lock_until = clock::now() + std::chrono::duration_cast<clock::duration>(
+		std::chrono::duration<double>(seconds)
+	);
+
+
+
+	// Use go() so limits and W_SAFE apply consistently
+	go(v, (w_sign >= 0.0 ? +W_SAFE : -W_SAFE));
+  };
+
+
+ 
+  // Stop if the robot is near the start position
+  if (near_start) { go(0.0, 0.0); exit(0); }
+
+  
 
   // --- Emergency: obstacle directly ahead or front-right ---
   if (!locked && (Fv < FRONT_STOP || FRv < FRONT_STOP)) {
@@ -263,6 +256,15 @@ void WallFollower::update_callback()
   go(0.0, 0.0);
 }
 
+void WallFollower::go(double v, double w) {
+    const double VMAX = 0.25;
+    const double WMAX = 1.8;
+    if (v >  VMAX) v =  VMAX;
+    if (v < -0.15) v = -0.15;
+    if (w >  WMAX) w =  WMAX;
+    if (w < -WMAX) w = -WMAX;
+    update_cmd_vel(v, w);
+  }
 
 
 
