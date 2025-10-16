@@ -194,6 +194,57 @@ void WallFollower::update_callback()
   // Stop if the robot is near the start position
   if (near_start) { go(0.0, 0.0); exit(0); }
 
+  const double OPEN_DELTA = 0.18;
+  bool left_alcove =
+      (LFv - LBv > OPEN_DELTA) &&
+      (LFv > LEFT_SET + 0.20) &&
+      (Fv < 0.70);
+
+  if (left_alcove && !locked) {
+    // Step 1: 
+    auto t0 = clock::now() + std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(0.25));
+    while (clock::now() < t0) {
+      go(0.05, +0.8);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Step 2: 
+    auto t1 = clock::now() + std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(0.35));
+    while (clock::now() < t1) {
+      go(0.08, 0.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Step 3: 
+    auto t2 = clock::now() + std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(1.8));
+    while (clock::now() < t2) {
+      go(0.0, +1.8); // go() 会裁剪到 WMAX=1.8
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Step 4: 倒出凹槽（0.40s）
+    auto t3 = clock::now() + std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(0.40));
+    while (clock::now() < t3) {
+      go(-0.10, 0.0);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Step 5: 右转回正（0.35s），回到主通道“贴左墙”姿态
+    auto t4 = clock::now() + std::chrono::duration_cast<clock::duration>(
+        std::chrono::duration<double>(0.35));
+    while (clock::now() < t4) {
+      go(0.05, -0.9);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // 完成凹槽机动，回到正常流程
+    return;
+  }
+
   
 
   // --- Emergency: obstacle directly ahead or front-right ---
