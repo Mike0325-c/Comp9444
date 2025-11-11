@@ -8,4 +8,7 @@ ros2 launch nav2_bringup bringup_launch.py \
   map:=/home/pi/map.yaml \
   params_file:=/home/pi/turtlebot3_ws/src/wall_follower/config/waypoint_nav_params.yaml
 
+ros2 launch nav2_bringup rviz_launch.py
+
+
 
