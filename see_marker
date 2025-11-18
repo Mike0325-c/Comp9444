@@ -3,329 +3,227 @@
 # Released under GPLv3: https://www.gnu.org/licenses/gpl-3.0.html
 # Author: Claude Sammut
 # Edited by: Bryson Chen, John Ma, Raunaq Plaha, JiaYang Jiang
-# Last Modified: 2025.10.15
+# Last Modified: 2025.11.11
 
-# ROS 2 program to subscribe to real-time streaming 
-# video from TurtleBot3 Pi camera and find coloured landmarks.
- 
-import rclpy # Python library for ROS 2
-from rclpy.node import Node # Handles the creation of nodes
-import cv2 # OpenCV library
-from cv_bridge import CvBridge # Package to convert between ROS and OpenCV Images
+# ROS 2 program to subscribe to TurtleBot3 Pi camera and find coloured landmarks
+# with mask publishing.
+
+# ---------------------------------------------------------------------
+
+import rclpy
+from rclpy.node import Node
+import cv2
+from cv_bridge import CvBridge
+import numpy as np
 import math
-import numpy as np # NumPy library
 
-from sensor_msgs.msg import CompressedImage, Image # Image is the message type
-from sensor_msgs.msg import LaserScan # Laser scan message type
-from sensor_msgs.msg import CameraInfo # Need to know camera frame
-from geometry_msgs.msg import Point, PointStamped
+from sensor_msgs.msg import CompressedImage, Image
+from geometry_msgs.msg import PointStamped
 
 import wall_follower.landmark
 from wall_follower.landmark import marker_type
 
-# camera variables and real-life measurements
-field_of_view_h = 62.2 # degrees
-field_of_view_v = 48.8 # degrees
-focal_length = 3.04  # mm
-pixel_size = 1.12   # microns
-real_object_size = 10.0 #cm
+# Camera parameters
+field_of_view_h = 62.2
+field_of_view_v = 48.8
 
-distance_numerator = real_object_size * (focal_length/10) / (pixel_size/1000)  #changed from real*focal*pixel_size to real*focal/pixel_size, previous was incorrect formula
-
-class SeeMarker(Node):
- """
- Create an ImageSubscriber class, which is a subclass of the Node class.
- """
- def __init__(self):
-  """
-  Class constructor to set up the node
-  """
-  # Initiate the Node class's constructor and give it a name
-  super().__init__('see_marker')
-
-  self.range = 0
-  self.prev_h = 0
-  self.prev_r = 0
-  self.seen_combinations = set()
-   
-  # Create the subscriber. This subscriber will receive an Image
-  # from the video_frames topic. The queue size is 10 messages.
-  self.subscription = self.create_subscription(
-   CompressedImage,
-   '/camera/image_raw/compressed',  # Change to "compressed" for real robot
-   self.listener_callback,
-   10 
-  )
-
-  # this is for my own laptop camera testing
-  # self.subscription = self.create_subscription(
-  #  CompressedImage,
-  #  '/image_raw/compressed',  # Change to "compressed" for real robot
-  #  self.listener_callback,
-  #  10 
-  # )
-  self.subscription # prevent unused variable warning
-   
-  # Used to convert between ROS and OpenCV images
-  self.br = CvBridge()
-
-  self.point_publisher = self.create_publisher(PointStamped, '/marker_position', 10)
-  self.mask_publisher = self.create_publisher(Image, '/see_marker/mask', 10)
-
- def reset_combinations(self):
-  """Reset the set of seen marker combinations"""
-  self.seen_combinations.clear()
-
-
- def listener_callback(self, data):
-  """
-  Callback function.
-  """
-  #self.get_logger().info('Receiving video frame')
-
-  # Handle both image types
-  if isinstance(data, CompressedImage):
-   np_arr = np.frombuffer(data.data, np.uint8)
-   current_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-  else:  # sensor_msgs/msg/Image
-   current_frame = self.br.imgmsg_to_cv2(data, desired_encoding='bgr8')
-
-  if current_frame is None:
-   self.get_logger().warn("Failed to convert image")
-   return
-
-
-  # The following code is a simple example of colour segmentation
-  # and connected components analysis
-  
-  # Convert BGR image to HSV
-  hsv_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2HSV)
-
-  # Find pink blob
-  pink_blob = segment(current_frame, hsv_frame, "pink")
-  if pink_blob:
-   (pink_x, pink_y, pink_h, p_d, p_a) = pink_blob
-
-   for c in ["blue", "green", "yellow"]:
-    blob = segment(current_frame, hsv_frame, c)
-    if blob:
-     (c_x, c_y, c_h, c_d, c_a) = blob
-
-     # Check to see if the blobs are verically aligned
-     if abs(pink_x - c_x) > pink_h:
-#      print(f'pink_x = {pink_x}, pink_y = {pink_y}, h = {pink_h}')
-      continue
-
-     marker_at = PointStamped()
-     marker_at.header.stamp = self.get_clock().now().to_msg()
-     marker_at.header.frame_id = 'camera_link'
-
-     """
-     The next few lines are a hack. Since the markers are always on the ground,
-     we don't use the "z" coordinate for position, so instead we use it to
-     store the parker type. Ugly, but it saves creating a new message type.
-     """
-     # Determine the combination
-     combination = c + '/pink' if c_y < pink_y else 'pink/' + c
-     
-     # Only proceed if we haven't seen this combination before
-     if combination not in self.seen_combinations:
-      if c_y < pink_y: # +y is down
-       print(c, "/ pink", f'{c_d:.2f}, {c_a:.2f}')
-       marker_at.point.z = float(marker_type.index(combination))
-      else:
-       print("pink / ", c, f'{p_d:.2f}, {p_a:.2f}')
-       marker_at.point.z = float(marker_type.index(combination))
-      
-      x, y = polar_to_cartesian(c_d, c_a)
-      marker_at.point.x = x
-      marker_at.point.y = y
-      
-      # Add the combination to our seen set
-      self.seen_combinations.add(combination)
-
-     # print(f'Camera coordinates: {x}, {y}')
-     self.point_publisher.publish(marker_at)
-     self.get_logger().info('Published Point: x=%f, y=%f, z=%f' %
-      (marker_at.point.x, marker_at.point.y, marker_at.point.z))
-     # print('Published Point: x=%f, y=%f, z=%f' %
-     #  (marker_at.point.x, marker_at.point.y, marker_at.point.z))
-  else:
-   print("No marker found")
-
-  # Display camera image
-  cv2.imshow("camera", current_frame) 
-  cv2.waitKey(1)
-
-
+# ---------------------------------------------------------------------
+# this works better
 colours = {
- "pink":   ((140,65,0), (160, 220, 255)),
- "blue":  ((110,65,0), (130, 200, 255)),
- "green": ((40,60,0), (90, 255, 255)),
- "yellow": ((25,65,0), (32, 220, 255))
+    "pink": ((145, 120, 120), (175, 255, 255)),
+    "blue": ((95, 100, 100), (105, 255, 255)),
+    "green": ((55, 60, 75), (87, 255, 255)),
+    "yellow": ((25, 80, 75), (32, 255, 255))
 }
 
+# ---------------------------------------------------------------------
 
-# def segment(current_frame, hsv_frame, colour):
-#  """
-#  Mask out everything except the specified colour
-#  Connect pixels to form a blob
-#  """
+class SeeMarker(Node):
+    def __init__(self):
+        super().__init__('see_marker')
 
-#  (lower, upper) = colours[colour]
+        self.br = CvBridge()
 
-#  # Mask out everything except pixels of colour parameter
-#  mask = cv2.inRange(hsv_frame, lower, upper)
-#  result = cv2.bitwise_and(current_frame, current_frame, mask=mask)
+        # Subscribe to camera
+        self.subscription = self.create_subscription(
+            CompressedImage,
+            '/camera/image_raw/compressed',
+            self.listener_callback,
+            10
+        )
+        self.subscription
 
-#  # Run 4-way connected components, with statistics
-#  blobs = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
+        # Publishers
+        self.point_publisher = self.create_publisher(PointStamped, '/marker_position', 10)
+        self.mask_publisher = self.create_publisher(Image, '/see_marker/mask', 10)
 
-#  # Display masked image
-#  cv2.imshow("result", result)
- 
-#  # Print statistics for each blob (connected component)
-#  return get_stats(blobs, colour)
+    # -----------------------------------------------------------------
+
+    def listener_callback(self, data):
+        # Decode ROS image
+        if isinstance(data, CompressedImage):
+            np_arr = np.frombuffer(data.data, np.uint8)
+            current_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        else:
+            current_frame = self.br.imgmsg_to_cv2(data, desired_encoding='bgr8')
+
+        if current_frame is None:
+            self.get_logger().warn("Failed to convert image")
+            return
+
+        hsv_frame = cv2.cvtColor(current_frame, cv2.COLOR_BGR2HSV)
+
+        # Detect pink blob
+        pink_blob, pink_mask = segment(current_frame, hsv_frame, "pink")
+
+        # Initialize mask for publishing
+        mask_to_publish = pink_mask.copy() if pink_mask is not None else np.zeros(current_frame.shape[:2], dtype=np.uint8)
+
+        if pink_blob:
+            (pink_x, pink_y, pink_h, p_d, p_a) = pink_blob
+
+            for c in ["blue", "green", "yellow"]:
+                blob, mask = segment(current_frame, hsv_frame, c)
+                if mask is not None:
+                    mask_to_publish = cv2.bitwise_or(mask_to_publish, mask)
+
+                if blob:
+                    (c_x, c_y, c_h, c_d, c_a) = blob
+
+                    if abs(pink_x - c_x) > pink_h:
+                        continue
+
+                    marker_at = PointStamped()
+                    marker_at.header.stamp = self.get_clock().now().to_msg()
+                    marker_at.header.frame_id = 'camera_link'
+
+                    if c_y < pink_y:
+                        marker_at.point.z = float(marker_type.index(c + '/pink'))
+                    else:
+                        marker_at.point.z = float(marker_type.index('pink/' + c))
+
+                    x, y = polar_to_cartesian(c_d, c_a)
+                    marker_at.point.x = x
+                    marker_at.point.y = y
+
+                    self.point_publisher.publish(marker_at)
+                    #print('Published Point: x=%f, y=%f, z=%f' %
+     #  (marker_at.point.x, marker_at.point.y, marker_at.point.z))
+
+        # Publish combined mask
+        mask_msg = self.br.cv2_to_imgmsg(mask_to_publish, encoding="mono8")
+        self.mask_publisher.publish(mask_msg)
+
+        # Display images for debugging
+        cv2.imshow("camera", current_frame)
+        cv2.imshow("mask", mask_to_publish)
+        cv2.waitKey(1)
+
+# ---------------------------------------------------------------------
 
 def segment(current_frame, hsv_frame, colour):
- """
- Mask out everything except the specified colour
- Connect pixels to form a blob and draw label on the detected region
- """
+    (lower, upper) = colours[colour]
 
- (lower, upper) = colours[colour]
+    # Mask for target colour
+    mask = cv2.inRange(hsv_frame, lower, upper)
+    result = cv2.bitwise_and(current_frame, current_frame, mask=mask)
 
- # Mask out everything except pixels of the specified colour
- mask = cv2.inRange(hsv_frame, lower, upper)
- result = cv2.bitwise_and(current_frame, current_frame, mask=mask)
+    # Connected components
+    blobs = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
+    blob_info = get_stats(blobs, colour)
 
- # Run 4-way connected components, with statistics
- blobs = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
+    # Draw blob label
+    if blob_info:
+        (cx, cy, h, distance, angle) = blob_info
+        text_colors = {
+            "pink": (180, 105, 255),
+            "blue": (255, 0, 0),
+            "green": (0, 255, 0),
+            "yellow": (0, 255, 255)
+        }
 
- # Get blob stats (and centroid of largest)
- blob_info = get_stats(blobs, colour)
+        cv2.putText(
+            current_frame,
+            colour,
+            (int(cx) - 30, int(cy) - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            text_colors.get(colour, (255, 255, 255)),
+            2,
+            cv2.LINE_AA
+        )
+        cv2.circle(current_frame, (int(cx), int(cy)), 5, text_colors[colour], -1)
 
- # If a blob was found, label it on the original frame
- if blob_info:
-  (cx, cy, h, distance, angle) = blob_info
+    return blob_info, mask
 
-  # Define a color for the text (BGR)
-  text_colors = {
-   "pink": (180, 105, 255),   # light pink
-   "blue": (255, 0, 0),
-   "green": (0, 255, 0),
-   "yellow": (0, 255, 255)
-  }
-
-  # Draw text label near the blob
-  cv2.putText(
-   current_frame,
-   colour,
-   (int(cx) - 30, int(cy) - 10),
-   cv2.FONT_HERSHEY_SIMPLEX,
-   0.8,
-   text_colors.get(colour, (255, 255, 255)),
-   2,
-   cv2.LINE_AA
-  )
-
-  # Optional: Draw a circle on the blob center
-  cv2.circle(current_frame, (int(cx), int(cy)), 5, text_colors[colour], -1)
-
- # (optional) show masked result for debugging
- # cv2.imshow("result", result)
-
- return blob_info
-
+# ---------------------------------------------------------------------
 
 def get_stats(blobs, colour):
- """
- Print statistics for each blob (connected component)
- of the specified colour
- Return the centroid and height of the largest blob, if there is one.
- """
+    (numLabels, labels, stats, centroids) = blobs
+    if numLabels <= 1:
+        return None
 
- (numLabels, labels, stats, centroids) = blobs
- if numLabels == 0:
-  return None
+    largest = 0
+    rval = None
+    centre = 320  # Image center
 
- largest = 0
- rval = None
- centre = 320 # 640/2
+    for i in range(1, numLabels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+        (cx, cy) = centroids[i]
 
- for i in range(1, numLabels):
-  x = stats[i, cv2.CC_STAT_LEFT]
-  y = stats[i, cv2.CC_STAT_TOP]
-  w = stats[i, cv2.CC_STAT_WIDTH]
-  h = stats[i, cv2.CC_STAT_HEIGHT]
-  area = stats[i, cv2.CC_STAT_AREA]
-  (cx, cy) = centroids[i]
-  print(colour, x, y, w, h, area, cx, cy)
+        if area < 150:
+            continue
 
-  # Skip small noise blobs
-  # if area < 1500:
-  #  continue 
+        if area > largest:
+            largest = area
+            distance = 35.772 * pow(h, -0.859) * 0.5 ######################################################################
 
-  if area > largest:
-   largest = area
-   # distance = 35.772 * pow(h, -0.859) # obtained experimentally
-   distance = distance_numerator / h # https://www.baeldung.com/cs/cv-compute-distance-from-object-video
-   
-   """
-   The condition below accounts for when the marker is at the edge of the screen 
-   and is only paritally visible. The assumption is that if the aspect ratio < 0.8
-   then it is only partially visisble.
-   We need two cases for when the marker is on the left or right edge.
-   """
-   aspect_ratio = h/w
-   if aspect_ratio < 0.8:
-    if cx < centre:
-     cx += h-w
-    else:
-     cx -= h-w
-   angle = (centre - cx) * field_of_view_h / 640
-   if angle < 0:
-    angle += 360
-   #print(distance)
-   rval = (cx, cy, h, distance, angle)
+            aspect_ratio = h / w
+            if aspect_ratio < 0.8:
+                if cx < centre:
+                    cx += h - w
+                else:
+                    cx -= h - w 
 
- return rval
+            angle = (centre - cx) * field_of_view_h / 640
+            angle_offset = -29.33
+            angle += angle_offset
+            if angle < 0:
+                angle += 360
+            print('distance to marker is ', distance)
+            #print('angle to marker is ', angle)
+            rval = (cx, cy, h, distance, angle)
 
+    return rval
+
+# ---------------------------------------------------------------------
 
 def polar_to_cartesian(distance, angle):
- # Convert angle from degrees to radians
- angle_rad = math.radians(angle)
+    angle_rad = math.radians(angle)
+    x = distance * math.cos(angle_rad)
+    y = distance * math.sin(angle_rad)
+    return x, y
 
- # Calculate x and y coordinates
- x = distance * math.cos(angle_rad)
- y = distance * math.sin(angle_rad)
-
- return x, y
-
+# ---------------------------------------------------------------------
 
 def main(args=None):
- 
- # Initialize the rclpy library
- rclpy.init(args=args)
- 
- # Create the node
- see_marker = SeeMarker()
- 
- # Spin the node so the callback function is called.
- try:
-  rclpy.spin(see_marker)
- except KeyboardInterrupt:
-  exit()
+    rclpy.init(args=args)
+    see_marker = SeeMarker()
 
- # Destroy the node explicitly
- # (optional - otherwise it will be done automatically
- # when the garbage collector destroys the node object)
- see_marker.destroy_node()
- 
- # Shutdown the ROS client library for Python
- rclpy.shutdown()
+    try:
+        rclpy.spin(see_marker)
+    except KeyboardInterrupt:
+        pass
 
- 
+    see_marker.destroy_node()
+    rclpy.shutdown()
+
+# ---------------------------------------------------------------------
+
 if __name__ == '__main__':
- main()
+    main()
  
